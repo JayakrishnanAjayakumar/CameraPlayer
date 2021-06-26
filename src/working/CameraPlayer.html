@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script src="supportfiles/jquery-3.3.1.min.js"></script>
+<!-- Bootstrap core CSS -->
+<link href="supportfiles/bootstrap.min.css" rel="stylesheet">
+<link href="supportfiles/dashboard.css" rel="stylesheet">
+<!-- custom style for SEDE -->
+<link href="supportfiles/sede.css" rel="stylesheet">
+<script src="supportfiles/bootstrap.min.js"></script>
+<script
+	src="http://maps.google.com/maps/api/js?key=AIzaSyBis1Boyn_1lnN34CojAkzm2k50UJ7UBA0&libraries=drawing">
+	
+</script>
+<script charset="utf-8" src="supportfiles/d3.min.js"
+	type="text/javascript"></script>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script type="text/javascript">
+	var gmap, coordsmap, coorddata,currtime, player, syncfile = null, currentsecond = -1, playerarray = [], videocount, jsondata, slider, timer, drawingManager, relmap, drawingdata = d3
+			.map(), currind = 0, selectedid = null, categories = d3.map(), kmldata, kmlparser, marker_icons = d3
+			.map(), animcircle = new google.maps.Circle({
+		'radius' : 2,
+		'strokeColor' : 'brown',
+		'fillColor' : 'red',
+		'fillOpacity' : 1.0,
+		'clickable' : false
+	}),gpscircleoption = {
+		'radius' : 3,
+		'strokeColor' : 'blue',
+		'fillColor' : 'blue',
+		'fillOpacity' : .01,
+		'clickable' : true
+	}, pathline = new google.maps.Polyline({
+		'strokeColor' : 'blue',
+		'strokeOpacity' : .7,
+		'clickable' : true
+	});
+	var pathlinestyle = {
+		'strokeColor' : 'blue',
+		'strokeOpacity' : .8,
+		'clickable' : true
+	};
+	var missingstyle = {
+		'strokeColor' : 'orange',
+		'strokeOpacity' : .8,
+		'clickable' : true
+	};
+	var threshold = 20;
+	var lines = [];
+
+	function initializemap() {
+		/*Initialize google map*/
+		gmap = new google.maps.Map(d3.select("#map").node(), {
+			zoom : 16,
+			center : new google.maps.LatLng(41.15, -81.36),
+			mapTypeId : google.maps.MapTypeId.ROADMAP
+		});
+		//create drawing manager
+		drawingManager = new google.maps.drawing.DrawingManager({
+			drawingMode : null,
+			drawingControl : true,
+			drawingControlOptions : {
+				position : google.maps.ControlPosition.TOP_CENTER,
+				drawingModes : [ 'marker', 'polygon', 'polyline' ]
+			},
+			markerOptions : {
+				draggable : true
+			},
+		});
+		drawingManager.setMap(gmap);
+		//set the listener for the drawing manager
+		google.maps.event.addListener(drawingManager, 'overlaycomplete',
+				function(event) {
+					var overlaydat = event.overlay;
+					overlaydat.set("id", currind);
+					overlaydat.set("desc", "");
+					overlaydat.set("val", "default");
+					if (event.type == 'marker') {
+						overlaydat.set("categ", "defaultpoint");
+						overlaydat.set("type", 'Point');
+						var markericon = getmarkericonforcategory(overlaydat
+								.get("categ"));
+						overlaydat.setIcon(markericon);
+					}
+					if (event.type == 'polygon') {
+						overlaydat.set("categ", "defaultpolygon");
+						overlaydat.set("type", 'Polygon');
+					}
+					if (event.type == 'polyline') {
+						overlaydat.set("type", 'Line');
+						overlaydat.set("categ", "defaultline");
+					}
+					google.maps.event.addListener(overlaydat, 'click',
+							function(ev) {
+								selectedid = this.get("id");
+								$('#edit_geom_modal').modal();
+								$('#geomdescription').val(this.get("desc"));
+								createcategoriesforgeom(this);
+							});
+					drawingdata.set(currind, overlaydat);
+					currind += 1;
+				});
+		player = document.getElementById("videoplayer");
+		$('#videoplayer').on('canplay', function() {
+			loadmapwithdata();
+		});
+		$('#videoplayer').on(
+				'timeupdate',
+				function() {
+					currtime = Math.floor(player.currentTime);
+					//slider.value=Math.floor(player.currentTime);
+					if (coordsmap != null || coordsmap.size() > 0) {
+						var curr = Math.floor(player.currentTime);
+						if (currentsecond != curr) {
+							currentsecond = curr;
+							if (!coordsmap.has(currentsecond)) {
+								animcircle.setMap(null);
+							} else {
+								var crds = coordsmap.get(currentsecond);
+								animcircle.setCenter(new google.maps.LatLng(
+										crds[1], crds[0]));
+								animcircle.setMap(gmap);
+								autofocus();
+							}
+						}
+					}
+				});
+		google.maps.event.addListener(pathline, 'click', function(event) {
+			var index = getnearestposition(event.latLng);
+			animcircle.setCenter(pathline.getPath().getAt(index));
+			$('#gpstime').val(index);
+		});
+		categories.set('defaultpoint', [ 'Point', [ 'default' ],
+				'http://maps.google.com/mapfiles/kml/paddle/ylw-stars.png' ]);
+		categories.set('defaultpolygon', [ 'Polygon', [ 'default' ] ]);
+		categories.set('defaultline', [ 'Line', [ 'default' ] ]);
+	}
+
+	function getmarkericonforcategory(category) {
+		return {
+			scaledSize : new google.maps.Size(30, 30),
+			url : categories.get(category)[2]
+		};
+	}
+
+	//change category value based on category change
+	function changecategory() {
+		d3.select("#values").selectAll("option").remove();
+		var values = categories.get(d3.select("#categories").node().value)[1];
+		d3.select("#values").selectAll("option").data(values).enter().append(
+				"option").attr("value", function(d) {
+			return d;
+		}).text(function(d) {
+			return d;
+		});
+	}
+
+	function setlineevent(lineobj) {
+		google.maps.event.addListener(lineobj, 'click', function(event) {
+			if (coordsmap != null)
+				moveto(event.latLng);
+			else {
+				var index = getnearestposition_new(event.latLng);
+				var points = coordsmap.values();
+				animcircle.setCenter(new google.maps.LatLng(points[index][1],
+						points[index][0]));
+				$('#gpstime').val(index);
+			}
+		});
+	}
+
+	//SAVE GEOM UPDATES
+	function saveupdates() {
+		var overlaydat = drawingdata.get(selectedid);
+		overlaydat.set("desc", $("#geomdescription").val());
+		overlaydat.set("categ", d3.select("#categories").node().value);
+		overlaydat.set("val", d3.select("#values").node().value);
+		$("#edit_geom_modal").modal('hide');
+		//changemarkersymbol(overlaydat);
+		if (overlaydat.get("type") == 'Point')
+			overlaydat
+					.setIcon(getmarkericonforcategory(overlaydat.get('categ')));
+		selectedid = null;
+	}
+
+	//Delete Geom
+	function deletegeom() {
+		var overlaydat = drawingdata.get(selectedid);
+		overlaydat.setMap(null);
+		drawingdata.remove(selectedid);
+		$("#edit_geom_modal").modal('hide');
+		selectedid = null;
+	}
+
+	//populate categories for the overlay
+	function createcategoriesforgeom(overlaydat) {
+		var categtype = overlaydat.get('type');
+		d3.select("#categories").selectAll("option").remove();
+		d3.select("#values").selectAll("option").remove();
+		//populate categories
+		d3.select("#categories").selectAll("option").data(
+				categories.keys().filter(function(d) {
+					if (categories.get(d)[0] == categtype) {
+						return true;
+					}
+					return false;
+				})).enter().append("option").attr("value", function(d) {
+			return d;
+		}).text(function(d) {
+			return d;
+		});
+		d3.select("#categories").selectAll("option").each(function(d) {
+			if (d === overlaydat.get("categ"))
+				return d3.select(this).attr("selected", "selected");
+		});
+		var values = categories.get(overlaydat.get("categ"))[1];
+		d3.select("#values").selectAll("option").data(values).enter().append(
+				"option").attr("value", function(d) {
+			return d;
+		}).text(function(d) {
+			return d;
+		});
+		d3.select("#values").selectAll("option").each(function(d) {
+			if (d === overlaydat.get("val"))
+				return d3.select(this).attr("selected", "selected");
+		});
+	}
+
+	//utility function to calculate the distance
+	Math.dist = function(x1, y1, x2, y2) {
+		if (!x2)
+			x2 = 0;
+		if (!y2)
+			y2 = 0;
+		return Math.sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1));
+	};
+
+	function getnearestposition_new(mapcoordinates) {
+		var minind = 0, mindist;
+		var points = coordsmap.values();
+		mindist = Math.dist(points[0][0], points[0][1], mapcoordinates.lng(),
+				mapcoordinates.lat());
+		for (var i = 1; i < points.getLength(); i++) {
+			var currdist = Math.dist(points[i][0], points[i][1], mapcoordinates
+					.lng(), mapcoordinates.lat());
+			if (currdist < mindist) {
+				mindist = currdist;
+				minind = i;
+			}
+		}
+		return minind;
+	}
+
+	function getnearestposition(mapcoordinates) {
+		var minind = 0, mindist;
+		var points = pathline.getPath();
+		mindist = Math.dist(points.getAt(0).lng(), points.getAt(0).lat(),
+				mapcoordinates.lng(), mapcoordinates.lat());
+		for (var i = 1; i < points.getLength(); i++) {
+			var currdist = Math.dist(points.getAt(i).lng(), points.getAt(i)
+					.lat(), mapcoordinates.lng(), mapcoordinates.lat());
+			if (currdist < mindist) {
+				mindist = currdist;
+				minind = i;
+			}
+		}
+		return minind;
+	}
+	
+	function moveto(gmaplatlon) {
+		var time = cp.getclosesttime(gmaplatlon.lng() + "," + gmaplatlon.lat());
+		player.currentTime = time;
+	}
+
+	function autofocus() {
+		if (!gmap.getBounds().contains(animcircle.getCenter())) {
+			gmap.setCenter(animcircle.getCenter());
+		}
+	}
+	function loadmapwithdata() {
+		if (coordsmap == null || coordsmap.size() == 0) {
+			alert("No GPS data available");
+			return;
+		}
+		currind = 0;
+		if (drawingdata) {
+			keys = drawingdata.keys();
+			for (i = 0; i < keys.length; i++) {
+				drawingdata.get(keys[i]).setMap(null);
+			}
+			drawingdata = d3.map();
+		}
+		var timekeys = coordsmap.keys();
+		var prevkey, currcords = [];
+		currcords.push(new google.maps.LatLng(coordsmap.get(timekeys[0])[1],
+				coordsmap.get(timekeys[0])[0]));
+		prevkey = timekeys[0];
+		for (i = 1; i < timekeys.length; i++) {
+			currentcoordinates = new google.maps.LatLng(coordsmap
+					.get(timekeys[i])[1], coordsmap.get(timekeys[i])[0]);
+			if (parseInt(timekeys[i]) - parseInt(prevkey) > threshold) {
+				pathlines = new google.maps.Polyline(pathlinestyle);
+				pathlines.setPath(currcords);
+				setlineevent(pathlines);
+				pathlines.setMap(gmap);
+				lines.push(pathlines);
+				missline = new google.maps.Polyline(missingstyle);
+				missline.setPath([ currcords[currcords.length - 1],
+						currentcoordinates ]);
+				setlineevent(missline);
+				missline.setMap(gmap);
+				lines.push(missline);
+				currcords = [];
+			}
+			prevkey = timekeys[i];
+			currcords.push(currentcoordinates);
+		}
+		if (currcords.length > 0) {
+			pathlines = new google.maps.Polyline(pathlinestyle);
+			pathlines.setPath(currcords);
+			setlineevent(pathlines);
+			pathlines.setMap(gmap);
+			lines.push(pathlines);
+		}
+		//clear existing set of circles and create new one
+		if(coorddata){
+			coorddata.forEach(function(circ){
+				circ.setMap(null);
+			});
+		}
+		coorddata=[];
+		for (i = 1; i < timekeys.length; i++) {
+			gpscircle=new google.maps.Circle(gpscircleoption);
+			gpscircle.setCenter(new google.maps.LatLng(
+				coordsmap.get(timekeys[i])[1], coordsmap.get(timekeys[i])[0]));
+			gpscircle.addListener('click', function() {
+				if (coordsmap != null)
+					moveto(this.getCenter());
+			});
+			coorddata.push(gpscircle);
+		}
+		animcircle.setCenter(new google.maps.LatLng(
+				coordsmap.get(timekeys[0])[1], coordsmap.get(timekeys[0])[0]));
+		animcircle.setMap(gmap);
+		gmap.setCenter(animcircle.getCenter());
+		switchviews();
+	}
+	
+	function switchviews(){
+		if($("#point").is(':checked')){
+			//hide all the lines
+			lines.forEach(function(lin){
+				lin.setMap(null);
+			});
+			coorddata.forEach(function(circ){
+				circ.setMap(gmap);
+			});
+		}
+		else{
+			coorddata.forEach(function(circ){
+				circ.setMap(null);
+			});
+			lines.forEach(function(lin){
+				lin.setMap(gmap);
+			});
+		}
+	}
+	function clearalllines() {
+		for (i = 0; i < lines.length; i++) {
+			lines[i].setMap(null);
+		}
+		lines = [];
+	}
+	function upload() {
+		currentsecond = -1;
+		coordsmap = null;
+		pathline.setMap(null);
+		clearalllines();
+		animcircle.setMap(null);
+		player.src = "";
+		$('#fileinfo').val("");
+		var datajson = JSON.parse(cp.upload());
+		if (datajson.Error.length != 0) {
+			alert(datajson.Error);
+			$('#fileinfo').val("");
+			return;
+		}
+		$('#fileinfo').val(datajson.filename);
+		coordsmap = d3.map(datajson.mediamap);
+		player.src = datajson.filename;
+		syncfile = null;
+	}
+	function setoutputfolder() {
+		var foldername = cp.browse_folder()
+		$('#outfolderinfo').val(foldername);
+	}
+	function downloadCSV() {
+		if ($('#outfolderinfo').val() == "") {
+			alert("Output folder needs to be set");
+			return;
+		}
+		if (!coordsmap || coordsmap.size() == 0) {
+			alert("No data available for download");
+			return;
+		}
+		var filename = prompt("Please enter the filename", "");
+		alert(cp.downloadcsv(filename));
+	}
+
+	function downloadGPS() {
+		if ($('#outfolderinfo').val() == "") {
+			alert("Output folder needs to be set");
+			return;
+		}
+		if (!coordsmap || coordsmap.size() == 0) {
+			alert("No data available for download");
+			return;
+		}
+		var filename = prompt("Please enter the filename", "");
+		alert(cp.downloadgps(filename));
+	}
+
+	function sync() {
+		if (coordsmap != null) {
+			alert("Already synched");
+			return;
+		}
+		if (syncfile) {
+			player.pause();
+			pathline.setMap(null);
+			var index = parseInt($('#gpstime').val());
+			var currvideotime = Math.floor(player.currentTime);
+			var dataobj = JSON.parse(cp.syncdata(index, currvideotime,
+					syncfile, Math.floor(player.duration)));
+			coordsmap = d3.map(dataobj.mediamap);
+			clearalllines();
+			animcircle.setMap(null);
+			loadmapwithdata();
+			syncfile = null;
+			$('#gpstime').val("0");
+			alert('The GPS and video are synched.');
+		}
+	}
+	function uploadgpx() {
+		if (!player.src) {
+			alert("No Video Uploaded. First upload the video");
+			return;
+		}
+		player.pause();
+		var gpxdat = JSON.parse(cp.parseuploadedgpx());
+		if (gpxdat.Error && gpxdat.Error.length > 0) {
+			alert(gpxdat.Error);
+			return;
+		}
+		clearalllines();
+		//clear current data
+		syncfile = gpxdat.gpsfilename;
+		coordsmap = null;
+		cp.clearcurrentdata();
+		pathline.setMap(null);
+		pathline.setPath(gpxdat.coordinates);
+		pathline.setMap(gmap);
+		animcircle.setMap(null);
+		animcircle.setCenter(gpxdat.coordinates[0]);
+		animcircle.setMap(gmap);
+		$('#gpstime').val("0");
+		gmap.setCenter(gpxdat.coordinates[0]);
+		alert("GPS data has been loaded.\n Please find an appropriate section in video and click on the corresponding location in the map.\n The map will display the nearest GPS location to the clicked location. Press Sync button to complete synching. ");
+	}
+
+	function refresh() {
+		player.currentTime = currtime;
+	}
+	function changeicon() {
+		$("#iconid").attr(
+				'src',
+				'http://maps.google.com/mapfiles/kml/pushpin/'
+						+ $("#iconnames").val() + '.png');
+	}
+
+	function removecategory() {
+		var selected = $('#categorieselect').val();
+		if (selected.length == 0)
+			return;
+		var dkeys = drawingdata.keys();
+		for (i = 0; i < dkeys.length; i++) {
+			var overlay = drawingdata.get(dkeys[i]);
+			if (selected.indexOf(overlay.get('categ')) != -1) {
+				if (overlay.get('type') == 'Point') {
+					overlay.set('categ', 'defaultpoint');
+					overlay.setIcon(getmarkericonforcategory(overlay
+							.get('categ')));
+				}
+				if (overlay.get('type') == 'Line')
+					overlay.set('categ', 'defaultline');
+				if (overlay.get('type') == 'Polygon')
+					overlay.set('categ', 'defaultpolygon');
+				overlay.set('val', 'default');
+				drawingdata.set(dkeys[i], overlay);
+			}
+		}
+		for (j = 0; j < selected.length; j++)
+			categories.remove(selected[j]);
+		d3.select("#categorieselect").selectAll('option').each(function(d) {
+			if (selected.indexOf(d3.select(this).property("value")) != -1)
+				d3.select(this).remove()
+		});
+		$('#categbox').val("");
+		$('#valuesbox').val("");
+	}
+
+	function addcategory() {
+		if ($('#categbox').val().length == 0
+				|| $('#valuesbox').val().length == 0) {
+			return;
+		}
+		if (categories.has($('#categbox').val())) {
+			alert('Category already exists.');
+			return;
+		}
+		var categdata = [];
+		categdata.push($('#typebox').val());
+		var values = $('#valuesbox').val().split(',');
+		categdata.push(values);
+		if ($('#typebox').val() == 'Point') {
+			categdata.push($("#iconid").attr('src'));
+		}
+		categories.set($('#categbox').val(), categdata);
+		d3.select("#categorieselect").append("option").property("value",
+				$('#categbox').val()).text($('#categbox').val());
+		$('#categbox').val("");
+		$('#valuesbox').val("");
+	}
+
+	function getdigitzeddata() {
+		data = [];
+		drawingdata.keys().forEach(
+				function(ids) {
+					var obj = {};
+					var datum = drawingdata.get(ids);
+					obj.type = datum.get('type');
+					obj.categ = datum.get("categ")
+					obj.val = datum.get("val")
+					obj.desc = datum.get("desc")
+					/*var description = "category:" + datum.get("categ") + " "
+					+ "value:" + datum.get("val") + " "
+					+ "description:" + datum.get("desc");
+					obj.description = description;*/
+					geometry = null;
+					if (obj.type == 'Point') {
+						geometry = [ datum.getPosition().lng(),
+								datum.getPosition().lat() ];
+						obj.markerurl = categories.get(datum.get("categ"))[2];
+					}
+					if (obj.type == 'Polygon' || obj.type == 'Line') {
+						geometry = [];
+						datum.getPath().getArray().forEach(function(d) {
+							geometry.push([ d.lng(), d.lat() ]);
+						});
+					}
+					obj.geometry = geometry;
+					data.push(obj);
+				});
+		return data;
+	}
+
+	function downloaddigtizedKMLFile() {
+		if ($('#outfolderinfo').val() == "") {
+			alert("Output folder needs to be set");
+			return;
+		}
+		if (drawingdata.size() == 0)
+			return;
+		data = getdigitzeddata();
+		var filename = prompt("Please enter the filename", "");
+		alert(cp.downloaddigitizedkml(JSON.stringify(data), filename));
+	}
+	function downloaddigtizedshapeFile() {
+		if ($('#outfolderinfo').val() == "") {
+			alert("Output folder needs to be set");
+			return;
+		}
+		if (drawingdata.size() == 0)
+			return;
+		data = getdigitzeddata();
+		var filename = prompt("Please enter the filename", "");
+		alert(cp.downloaddigitizedshape(JSON.stringify(data), filename));
+	}
+</script>
+</head>
+<body onload="initializemap()">
+	<!-- container for the page -->
+	<div class="container-fluid contfill">
+		<!--Viz area-->
+		<div class="row vizfill">
+			<div class=" col-md-9 fullfill">
+				<video id="videoplayer" controls>
+					<source src="" type="video/mp4">
+				</video>
+			</div>
+			<div class="col-md-3 mfill">
+				<div class="row newmfill">
+					<div class="fullfill" id="map"></div>
+				</div>
+				<div class="row cfill">
+					<div class="col-md-3">
+						<button type="button" class="btn btn-primary"
+							onclick="uploadgpx()">Upload GPS</button>
+					</div>
+					<div class="col-md-3">
+						<button type="button" class="btn btn-primary" onclick="sync()">Synchronize</button>
+					</div>
+					<div class="col-md-3">
+						<input type="text" val="" id="gpstime" style="width: 80%;">
+					</div>
+					<div class="col-md-3">
+						<div class="col-md-2">
+							<input type="checkbox" id="point" onchange="switchviews()">
+						</div>
+						<div class="col-md-10">
+							<span>Point</span>
+						</div>
+					</div>
+				</div>
+				<div class="row categfill" style="background-color: silver">
+					<div class="col-md-12">
+						<!-- <div class="row" style="height: 6%; min-height: 6%;">
+							<div class="col-md-4"></div>
+							<div class="col-md-8">
+								<h6>Categories</h6>
+							</div>
+						</div> -->
+						<div class="row" style="height: 100%; min-height: 100%;">
+							<div class="col-md-9">
+								<div class="row" style="height: 20%; min-height: 20%;">
+									<div class="col-md-3">
+										<b>Name</b>
+									</div>
+									<div class="col-md-5">
+										<input type="text" id="categbox" style="width: 100%;">
+									</div>
+									<div class="col-md-3">
+										<button type="button" onclick="addcategory()">+</button>
+									</div>
+								</div>
+								<div class="row"
+									style="height: 20%; min-height: 20%; margin-top: 3%;">
+									<div class="col-md-3">
+										<b>Values</b>
+									</div>
+									<div class="col-md-5">
+										<input type="text" id="valuesbox" style="width: 100%;">
+									</div>
+								</div>
+								<div class="row"
+									style="height: 20%; min-height: 20%; margin-top: 3%;">
+									<div class="col-md-3">
+										<b>Type</b>
+									</div>
+									<div class="col-md-5">
+										<select id="typebox" style="width: 100%;">
+											<option value="Point">Point</option>
+											<option value="Line">Line</option>
+											<option value="Polygon">Polygon</option>
+										</select>
+									</div>
+									<div class="col-md-3">
+										<button type="button" onclick="removecategory()">-</button>
+									</div>
+								</div>
+								<div class="row"
+									style="height: 20%; min-height: 20%; margin-top: 3%;">
+									<div class="col-md-3">
+										<b>Icons</b>
+									</div>
+									<div class="col-md-5">
+										<select id="iconnames" style="width: 100%;"
+											onchange="changeicon()">
+											<option value="ylw-pushpin">ylw-pin</option>
+											<option value="blue-pushpin">blue-pin</option>
+											<option value="grn-pushpin">green-pin</option>
+											<option value="ltblu-pushpin">ltblu-pin</option>
+											<option value="purple-pushpin">purple-pin</option>
+											<option value="red-pushpin">red-pin</option>
+											<option value="wht-pushpin">white-pin</option>
+										</select>
+									</div>
+									<div class="col-md-4">
+										<img
+											src="http://maps.google.com/mapfiles/kml/pushpin/ylw-pushpin.png"
+											id="iconid" style="height: 50%; width: 30%">
+									</div>
+								</div>
+							</div>
+							<div class="col-md-3">
+								<div class="row">
+									<select id="categorieselect" style="width: 100%;" multiple></select>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+				<!-- <div class="row geomfill" id="geomedit" style="visibility: hidden">
+					<div class="col-md-8">
+						<div class="row">
+							<div class="col-md-12">
+								Category<select id="categories" class="form-control"
+									onchange="changecategory()"></select>
+							</div>
+						</div>
+						<div class="row">
+							<div class="col-md-12">
+								Value<select id="values" class="form-control"></select>
+							</div>
+						</div>
+						<div class="row">
+							<div class="col-md-3 col-md-offset-2">
+								<button type="button" class="btn btn-default btn-sm"
+									onclick="saveupdates()">Save</button>
+							</div>
+							<div class="col-md-3">
+								<button type="button" class="btn btn-default btn-sm"
+									onclick="deletegeom()">Delete</button>
+							</div>
+						</div>
+					</div>
+					<div class="col-md-4">
+						<div class="row quarterfill"></div>
+						<div class="row">
+							<div class="col-md-3 col-md-offset-2">
+								<textarea id="geomdescription"></textarea>
+							</div>
+						</div>
+					</div>
+				</div> -->
+			</div>
+		</div>
+		<!--Control area-->
+		<div class="row controlfill" style="margin-top: 1%;">
+			<div class="col-md-offset-2 col-md-5">
+				<div class="row">
+					<div class="col-md-4">
+						<button type="button" class="btn btn-primary" onclick="upload()">Upload
+							Video File</button>
+					</div>
+					<div class="col-md-4">
+						<input type="text" class="form-control" id="fileinfo" disabled>
+					</div>
+				</div>
+				<div class="row">
+					<button type="button" class="btn btn-primary" onclick="refresh()">Refresh</button>
+				</div>
+			</div>
+			<div class="col-md-5">
+				<div class="row">
+					<div class="col-md-4">
+						<button type="button" class="btn btn-primary"
+							onclick="setoutputfolder()">Outputfolder</button>
+					</div>
+					<div class="col-md-4">
+						<input type="text" class="form-control" id="outfolderinfo"
+							disabled>
+					</div>
+				</div>
+				<div class="row" style="margin-top: 3%;">
+					<div class="col-md-3">
+						<button type="button" class="btn btn-primary"
+							onclick="downloadGPS()">Download GPS</button>
+					</div>
+					<div class="col-md-3">
+						<button type="button" class="btn btn-primary"
+							onclick="downloadCSV()">Download CSV</button>
+					</div>
+					<div class="col-md-3">
+						<button type="button" class="btn btn-primary"
+							onclick="downloaddigtizedKMLFile()">Download KML</button>
+					</div>
+					<div class="col-md-3">
+						<button type="button" class="btn btn-primary"
+							onclick="downloaddigtizedshapeFile()">Download Shape</button>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div id="edit_geom_modal" class="modal fade" role="dialog">
+			<div class="modal-dialog">
+				<div class="modal-content">
+					<div class="modal-header">
+						<button type="button" class="close" data-dismiss="modal">&times;</button>
+						<h4 class="modal-title">Edit</h4>
+					</div>
+					<div class="modal-body">
+						<div class="row">
+							<div class="col-md-7">
+								<div class="row">
+									<div class="col-md-12">
+										Category<select id="categories" class="form-control"
+											onchange="changecategory()"></select>
+									</div>
+								</div>
+								<div class="row">
+									<div class="col-md-12">
+										Value<select id="values" class="form-control"></select>
+									</div>
+								</div>
+								<br>
+								<div class="row">
+									<div class="col-md-3 col-md-offset-2">
+										<button type="button" class="btn btn-default btn-sm"
+											onclick="saveupdates()">Save</button>
+									</div>
+									<div class="col-md-3">
+										<button type="button" class="btn btn-default btn-sm"
+											onclick="deletegeom()">Delete</button>
+									</div>
+								</div>
+							</div>
+							<div class="col-md-3">
+								<div class="row quarterfill"></div>
+								<div class="row">
+									<div class="col-md-3">
+										<textarea id="geomdescription"></textarea>
+									</div>
+								</div>
+							</div>
+						</div>
+					</div>
+					<div class="modal-footer">
+						<button type="button" class="btn btn-default" data-dismiss="modal">Close</button>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+</body>
+</html>
